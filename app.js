@@ -67,11 +67,13 @@ async function fetchJson(path, params = {}) {
 // ---------- AI Agent simulation messages ----------
 const AI_MESSAGES = [
   'AI Agent is scanning worldwide radio networks...',
-  'Querying global station databases...',
-  'Discovering new digital streams across continents...',
-  'Filtering high-quality stations by popularity...',
-  'Cross-referencing tags, countries & bitrates...',
-  'Compiling fresh station list for you...'
+  'Querying global station databases across 240+ countries...',
+  'Discovering high-bitrate digital streams...',
+  'Exploring popular genres: rock, jazz, news, electronic...',
+  'Checking top stations in Americas, Europe, Asia & more...',
+  'Filtering working streams & ranking by listener activity...',
+  'Cross-referencing tags, languages, codecs & bitrates...',
+  'Compiling a rich multi-region station collection...'
 ];
 
 function showAiStatus(msg) {
@@ -83,45 +85,137 @@ function hideAiStatus() {
   aiStatus.hidden = true;
 }
 
-// ---------- Load stations ----------
+// Popular genres the AI Agent will actively hunt for
+const POPULAR_TAGS = [
+  'pop', 'rock', 'news', 'jazz', 'classical', 'electronic', 'dance',
+  'hip hop', 'hiphop', 'country', 'metal', 'blues', 'reggae', 'folk',
+  'talk', 'sport', 'ambient', 'chill', 'house', 'techno', 'indie',
+  'soul', 'rnb', 'rap', 'latin', 'world', 'oldies', '80s', '90s',
+  'christian', 'gospel', 'lounge', 'trance', 'drum and bass'
+];
+
+// Major countries for geographic diversity (includes Indonesia for local relevance)
+const MAJOR_COUNTRIES = [
+  'United States', 'United Kingdom', 'Germany', 'France', 'Canada',
+  'Australia', 'Japan', 'India', 'Brazil', 'Indonesia', 'Netherlands',
+  'Italy', 'Spain', 'Mexico', 'South Korea', 'Sweden', 'Poland',
+  'Turkey', 'Russia', 'South Africa', 'Argentina', 'Thailand',
+  'Philippines', 'Malaysia', 'Singapore', 'Egypt', 'Nigeria'
+];
+
+// Simple concurrency limiter so we don't overwhelm the public API
+async function runInBatches(items, batchSize, worker) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(worker));
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+// ---------- Load stations (rich multi-source scan) ----------
 async function loadStations(isUpdate = false) {
   if (isUpdate) {
     updateBtn.classList.add('loading');
-    showAiStatus();
+    showAiStatus('AI Agent launching full worldwide scan...');
   } else {
-    stationGrid.innerHTML = Array(8).fill('<div class="skeleton"></div>').join('');
+    stationGrid.innerHTML = Array(12).fill('<div class="skeleton"></div>').join('');
   }
 
-  try {
-    // Fetch popular stations (top by clicks) + some by votes for variety
-    const [byClicks, byVotes] = await Promise.all([
-      fetchJson('/json/stations/topclick/100'),
-      fetchJson('/json/stations/topvote/50')
-    ]);
+  const map = new Map();
 
-    // Merge & dedupe by stationuuid
-    const map = new Map();
-    [...byClicks, ...byVotes].forEach(s => {
-      if (s.stationuuid && s.url_resolved && !map.has(s.stationuuid)) {
+  const addStations = (list) => {
+    if (!Array.isArray(list)) return;
+    list.forEach(s => {
+      if (s && s.stationuuid && (s.url_resolved || s.url) && !map.has(s.stationuuid)) {
+        // Skip stations known to be broken
+        if (s.lastcheckok === 0) return;
         map.set(s.stationuuid, s);
       }
     });
+  };
+
+  try {
+    // Phase 1 – Global popularity ranking
+    if (isUpdate) showAiStatus('Phase 1/4 · Ranking most-clicked & most-voted stations worldwide...');
+    const [byClicks, byVotes, byLastClick] = await Promise.all([
+      fetchJson('/json/stations/topclick/250'),
+      fetchJson('/json/stations/topvote/200'),
+      fetchJson('/json/stations/lastclick/150')
+    ]);
+    addStations(byClicks);
+    addStations(byVotes);
+    addStations(byLastClick);
+
+    // Phase 2 – Genre deep-dive (batched to be friendly to the public API)
+    if (isUpdate) showAiStatus('Phase 2/4 · Exploring 30+ popular genres & formats...');
+    const tagResults = await runInBatches(POPULAR_TAGS, 8, tag =>
+      fetchJson('/json/stations/search', {
+        tag: tag,
+        order: 'clickcount',
+        reverse: 'true',
+        limit: 40,
+        hidebroken: 'true'
+      }).catch(() => [])
+    );
+    tagResults.forEach(addStations);
+
+    // Phase 3 – Geographic coverage across major countries
+    if (isUpdate) showAiStatus('Phase 3/4 · Scanning major countries on every continent...');
+    const countryResults = await runInBatches(MAJOR_COUNTRIES, 7, country =>
+      fetchJson('/json/stations/search', {
+        country: country,
+        order: 'clickcount',
+        reverse: 'true',
+        limit: 30,
+        hidebroken: 'true'
+      }).catch(() => [])
+    );
+    countryResults.forEach(addStations);
+
+    // Phase 4 – High-quality / high-bitrate + recently changed streams
+    if (isUpdate) showAiStatus('Phase 4/4 · Collecting high-bitrate & recent streams...');
+    const [highBitrate, recent] = await Promise.all([
+      fetchJson('/json/stations/search', {
+        order: 'bitrate',
+        reverse: 'true',
+        limit: 100,
+        hidebroken: 'true',
+        bitrateMin: 128
+      }).catch(() => []),
+      fetchJson('/json/stations/search', {
+        order: 'changetimestamp',
+        reverse: 'true',
+        limit: 80,
+        hidebroken: 'true'
+      }).catch(() => [])
+    ]);
+    addStations(highBitrate);
+    addStations(recent);
 
     stations = Array.from(map.values());
 
-    // Also populate filters
-    populateFilters(stations);
+    // Prefer higher popularity when presenting
+    stations.sort((a, b) => (b.clickcount || 0) - (a.clickcount || 0));
 
+    // Cap for UI performance while keeping a rich catalogue
+    if (stations.length > 1400) {
+      stations = stations.slice(0, 1400);
+    }
+
+    populateFilters(stations);
     renderStations();
+
     const now = new Date();
     lastUpdated.textContent = isUpdate
-      ? `AI updated · ${now.toLocaleTimeString()}`
-      : `Loaded · ${now.toLocaleTimeString()}`;
+      ? `AI Agent updated · ${stations.length} stations · ${now.toLocaleTimeString()}`
+      : `Loaded · ${stations.length} stations · ${now.toLocaleTimeString()}`;
     stationCount.textContent = `${stations.length} stations`;
 
     if (isUpdate) {
-      showAiStatus('✅ AI Agent finished! Station list refreshed.');
-      setTimeout(hideAiStatus, 2800);
+      showAiStatus(`✅ AI Agent complete! Discovered ${stations.length} working stations worldwide.`);
+      setTimeout(hideAiStatus, 3200);
     }
   } catch (err) {
     console.error(err);
@@ -167,7 +261,8 @@ function populateFilters(list) {
   if (prevCountry) countryFilter.value = prevCountry;
 
   tagFilter.innerHTML = '<option value="">All Genres</option>';
-  [...tags].sort().slice(0, 80).forEach(t => {
+  // Show many genres so the richer list is fully filterable
+  [...tags].sort().slice(0, 200).forEach(t => {
     const opt = document.createElement('option');
     opt.value = t;
     opt.textContent = t;
