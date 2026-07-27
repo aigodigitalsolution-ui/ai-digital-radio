@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Digital Radio — Worldwide Stations</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="bg-glow"></div>
+
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <h1>AI DIGITAL RADIO</h1>
+        <span class="tagline">Powered by AI Agent · Worldwide Stations</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="updateBtn" class="btn-update" title="Ask AI Agent to refresh station list">
+        <span class="btn-icon">🤖</span>
+        <span class="btn-text">Update Stations</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="controls">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input type="text" id="searchInput" placeholder="Search stations, genres, countries..." autocomplete="off" />
+        <button id="clearSearch" class="clear-btn" hidden>×</button>
+      </div>
+      <div class="filters">
+        <select id="countryFilter">
+          <option value="">All Countries</option>
+        </select>
+        <select id="tagFilter">
+          <option value="">All Genres</option>
+        </select>
+        <select id="sortFilter">
+          <option value="clickcount">Most Popular</option>
+          <option value="votes">Top Voted</option>
+          <option value="name">A–Z</option>
+          <option value="bitrate">Highest Bitrate</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="ai-status" id="aiStatus" hidden>
+      <div class="ai-pulse"></div>
+      <p id="aiMessage">AI Agent is scanning worldwide radio networks...</p>
+    </section>
+
+    <section class="stats-bar">
+      <span id="stationCount">0 stations</span>
+      <span class="divider">•</span>
+      <span id="lastUpdated">Ready</span>
+    </section>
+
+    <section class="station-grid" id="stationGrid">
+      <!-- Stations rendered here -->
+    </section>
+
+    <div class="empty-state" id="emptyState" hidden>
+      <div class="empty-icon">📡</div>
+      <h3>No stations found</h3>
+      <p>Try a different search or ask the AI Agent to update the list.</p>
+    </div>
+  </main>
+
+  <footer class="now-playing" id="nowPlaying" hidden>
+    <div class="np-favicon">
+      <img id="npImg" src="" alt="" />
+      <div class="eq-bars" id="eqBars">
+        <span></span><span></span><span></span><span></span>
+      </div>
+    </div>
+    <div class="np-info">
+      <div class="np-name" id="npName">—</div>
+      <div class="np-meta" id="npMeta">—</div>
+    </div>
+    <div class="np-controls">
+      <button id="playPauseBtn" class="np-btn" title="Play / Pause">
+        <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+      </button>
+      <button id="stopBtn" class="np-btn" title="Stop">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
+      </button>
+      <button id="favBtn" class="np-btn" title="Favorite">
+        <svg id="favOutline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        <svg id="favFilled" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+      </button>
+    </div>
+    <audio id="audioPlayer" preload="none"></audio>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
