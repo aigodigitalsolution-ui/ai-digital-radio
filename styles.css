@@ -59,6 +59,69 @@ body {
   z-index: 0;
 }
 
+/* Toast / error banner */
+.toast {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(-120%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(92vw, 480px);
+  padding: 0.75rem 1rem;
+  background: rgba(30, 12, 20, 0.95);
+  border: 1px solid rgba(255, 80, 100, 0.45);
+  border-radius: 10px;
+  color: #ffc0c8;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  transition: transform 0.3s ease, opacity 0.3s ease;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toast.visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.toast.info {
+  border-color: rgba(0, 240, 255, 0.4);
+  color: #b8f4ff;
+  background: rgba(10, 24, 32, 0.95);
+}
+
+.toast.success {
+  border-color: rgba(0, 255, 157, 0.4);
+  color: #b8ffe0;
+  background: rgba(10, 28, 22, 0.95);
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  font-size: 1rem;
+}
+
+.toast-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+  opacity: 0.7;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.toast-close:hover {
+  opacity: 1;
+}
+
 /* Header */
 .header {
   position: relative;
@@ -164,7 +227,7 @@ body {
   position: relative;
   z-index: 5;
   flex: 1;
-  padding: 1.25rem 1.5rem 7rem;
+  padding: 1.25rem 1.5rem 8.5rem;
   max-width: 1400px;
   width: 100%;
   margin: 0 auto;
@@ -346,6 +409,42 @@ body {
   box-shadow: 0 0 16px var(--accent-glow);
 }
 
+/* Live health badges */
+.health-badge {
+  position: absolute;
+  top: 0.55rem;
+  left: 0.55rem;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 0.65rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  line-height: 1;
+}
+
+.health-badge.ok {
+  background: rgba(0, 255, 157, 0.2);
+  color: var(--success);
+  border: 1px solid rgba(0, 255, 157, 0.5);
+}
+
+.health-badge.remote {
+  background: rgba(0, 240, 255, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  font-size: 0.55rem;
+}
+
+.health-badge.suspect {
+  background: rgba(255, 180, 0, 0.2);
+  color: #ffb400;
+  border: 1px solid rgba(255, 180, 0, 0.45);
+}
+
 .station-favicon {
   width: 56px;
   height: 56px;
@@ -525,6 +624,76 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Real-time buffer / stream stats */
+.buffer-stats {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.buf-bar-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+  max-width: 220px;
+}
+
+.buf-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--success));
+  border-radius: 2px;
+  transition: width 0.25s ease, background 0.3s ease;
+}
+
+.buf-bar-fill.low {
+  background: linear-gradient(90deg, #ff6b35, #ffb400);
+}
+
+.buf-bar-fill.critical {
+  background: linear-gradient(90deg, #ff3355, #ff6b35);
+  animation: buf-pulse 0.8s ease-in-out infinite;
+}
+
+.buf-bar-fill.stalled {
+  background: #ff3355;
+  width: 100% !important;
+  opacity: 0.6;
+}
+
+@keyframes buf-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.buf-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.buf-details .buf-sep {
+  opacity: 0.4;
+}
+
+#bufState {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#bufState.playing { color: var(--success); }
+#bufState.buffering { color: #ffb400; }
+#bufState.stalled { color: #ff3355; }
+#bufState.paused { color: var(--text-dim); }
+#bufState.ended { color: var(--text-dim); }
+
 .np-controls {
   display: flex;
   gap: 0.4rem;
@@ -579,7 +748,15 @@ body {
   }
 
   .main {
-    padding: 1rem 1rem 6.5rem;
+    padding: 1rem 1rem 8rem;
+  }
+
+  .buf-details {
+    font-size: 0.62rem;
+  }
+
+  .buf-bar-track {
+    max-width: 140px;
   }
 
   .station-grid {

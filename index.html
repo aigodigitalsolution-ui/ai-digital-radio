@@ -13,6 +13,13 @@
   <div class="bg-grid"></div>
   <div class="bg-glow"></div>
 
+  <!-- Global toast / error banner -->
+  <div id="toast" class="toast" hidden role="alert" aria-live="assertive">
+    <span id="toastIcon" class="toast-icon">⚠</span>
+    <span id="toastMsg"></span>
+    <button id="toastClose" class="toast-close" aria-label="Dismiss">×</button>
+  </div>
+
   <header class="header">
     <div class="logo">
       <div class="logo-icon">
@@ -51,6 +58,7 @@
           <option value="">All Genres</option>
         </select>
         <select id="sortFilter">
+          <option value="health">Best Health / Popular</option>
           <option value="clickcount">Most Popular</option>
           <option value="votes">Top Voted</option>
           <option value="name">A–Z</option>
@@ -91,6 +99,20 @@
     <div class="np-info">
       <div class="np-name" id="npName">—</div>
       <div class="np-meta" id="npMeta">—</div>
+      <div class="buffer-stats" id="bufferStats">
+        <div class="buf-bar-track">
+          <div class="buf-bar-fill" id="bufBarFill"></div>
+        </div>
+        <div class="buf-details">
+          <span id="bufState">—</span>
+          <span class="buf-sep">·</span>
+          <span id="bufBuffered">buf 0s</span>
+          <span class="buf-sep">·</span>
+          <span id="bufReady">ready —</span>
+          <span class="buf-sep">·</span>
+          <span id="bufNet">net —</span>
+        </div>
+      </div>
     </div>
     <div class="np-controls">
       <button id="playPauseBtn" class="np-btn" title="Play / Pause">
