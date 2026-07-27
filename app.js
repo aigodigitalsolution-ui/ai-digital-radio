@@ -3,18 +3,23 @@
  * AI Agent "updates" the station list by fetching live data
  */
 
-const API_BASES = [
+// Seed mirrors — refreshed at runtime via live server discovery
+const API_BASES_SEED = [
+  'https://de2.api.radio-browser.info',
+  'https://fi1.api.radio-browser.info',
   'https://de1.api.radio-browser.info',
   'https://nl1.api.radio-browser.info',
   'https://at1.api.radio-browser.info',
   'https://all.api.radio-browser.info'
 ];
 
+let API_BASES = [...API_BASES_SEED];
 let currentApi = API_BASES[0];
 let stations = [];
 let currentStation = null;
 let favorites = [];
 let isPlaying = false;
+let serversDiscovered = false;
 
 // Local health knowledge (learned from real playback attempts)
 // { [stationuuid]: { status: 'ok'|'dead'|'unknown', checkedAt: number, fails: number } }
@@ -50,6 +55,7 @@ const favFilled = document.getElementById('favFilled');
 const eqBars = document.getElementById('eqBars');
 const bufBarFill = document.getElementById('bufBarFill');
 const bufStateEl = document.getElementById('bufState');
+const bufTransportEl = document.getElementById('bufTransport');
 const bufBufferedEl = document.getElementById('bufBuffered');
 const bufReadyEl = document.getElementById('bufReady');
 const bufNetEl = document.getElementById('bufNet');
@@ -59,6 +65,7 @@ let bufferMonitorId = null;
 let lastBufferedEnd = 0;
 let stallCount = 0;
 let isOnline = navigator.onLine;
+let activeTransport = 'http'; // 'http' | 'websocket' | 'mse'
 
 // ============================================================
 // ErrorHandler — centralized errors, toasts, storage, networking
@@ -122,16 +129,78 @@ const ErrorHandler = (() => {
   function fromNetwork(err) {
     if (!isOnline) return AppError('OFFLINE', 'You appear to be offline', err);
     if (err && err.name === 'AbortError') return AppError('TIMEOUT', 'Request timed out', err);
-    if (err && /Failed to fetch|NetworkError|Load failed/i.test(err.message || '')) {
+    if (err && err.name === 'NotAllowedError') {
+      return AppError('AUTOPLAY', 'Browser blocked autoplay — tap play', err);
+    }
+    if (err && err.name === 'NotSupportedError') {
+      return AppError('UNSUPPORTED', 'Stream format not supported by this browser', err);
+    }
+    if (err && /Failed to fetch|NetworkError|Load failed|network error/i.test(err.message || '')) {
       return AppError('NETWORK', 'Network request failed', err);
     }
     return AppError('NETWORK', (err && err.message) || 'Network error', err);
+  }
+
+  function fromUnknown(err) {
+    if (!err) return AppError('UNKNOWN', 'Something went wrong');
+    if (err.code && err.name === 'AppError') return err;
+    if (err.name === 'AppError') return err;
+    if (err.name === 'NotAllowedError' || err.name === 'NotSupportedError' || err.name === 'AbortError') {
+      return fromNetwork(err);
+    }
+    if (err.code && MEDIA_ERRORS[err.code]) return fromMedia({ error: err });
+    return AppError('UNKNOWN', err.message || String(err), err);
   }
 
   function messageOf(err) {
     if (!err) return 'Something went wrong';
     if (err.code && err.message) return err.message;
     return err.message || String(err);
+  }
+
+  /** Validate a stream URL before playback */
+  function validateStreamUrl(url) {
+    if (!url || typeof url !== 'string') {
+      return AppError('BAD_URL', 'Station has no stream URL');
+    }
+    const trimmed = url.trim();
+    if (!trimmed) return AppError('BAD_URL', 'Station has an empty stream URL');
+    if (!/^(https?:|wss?:)\/\//i.test(trimmed)) {
+      return AppError('BAD_URL', 'Invalid stream URL protocol');
+    }
+    // Mixed content: page is HTTPS but stream is plain HTTP — browsers often block
+    if (typeof location !== 'undefined' && location.protocol === 'https:' && /^http:\/\//i.test(trimmed)) {
+      // Warning only — many radios still work via upgraded paths; return null = ok with caution
+      return null;
+    }
+    return null; // valid
+  }
+
+  /** Run fn; on throw, normalize + toast + optional rethrow */
+  function guard(fn, opts = {}) {
+    const { label = 'Action', silent = false, rethrow = false } = opts;
+    try {
+      return fn();
+    } catch (e) {
+      const appErr = fromUnknown(e);
+      console.error(label + ' failed:', appErr);
+      if (!silent) toast(messageOf(appErr), 'error');
+      if (rethrow) throw appErr;
+      return undefined;
+    }
+  }
+
+  async function guardAsync(fn, opts = {}) {
+    const { label = 'Action', silent = false, rethrow = false } = opts;
+    try {
+      return await fn();
+    } catch (e) {
+      const appErr = fromUnknown(e);
+      console.error(label + ' failed:', appErr);
+      if (!silent) toast(messageOf(appErr), 'error');
+      if (rethrow) throw appErr;
+      return undefined;
+    }
   }
 
   // --- Safe localStorage ---
@@ -177,13 +246,85 @@ const ErrorHandler = (() => {
     });
   }
 
+  // --- Live mirror discovery ---
+  async function discoverServers() {
+    // Probe seed hosts for /json/servers (or /json/stats as health check)
+    const candidates = [...API_BASES_SEED];
+    for (const base of candidates) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(base + '/json/servers', {
+          method: 'GET',
+          mode: 'cors',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        const list = await res.json();
+        if (!Array.isArray(list) || list.length === 0) continue;
+
+        const discovered = [];
+        list.forEach(s => {
+          const name = (s && (s.name || s)) || '';
+          if (typeof name === 'string' && name.includes('api.radio-browser.info')) {
+            const host = name.replace(/\.$/, '');
+            const url = host.startsWith('http') ? host : 'https://' + host;
+            if (!discovered.includes(url)) discovered.push(url);
+          }
+        });
+
+        if (discovered.length) {
+          // Prefer discovered, keep seeds as fallback
+          API_BASES = [...discovered, ...API_BASES_SEED.filter(b => !discovered.includes(b))];
+          currentApi = API_BASES[0];
+          serversDiscovered = true;
+          console.info('Radio Browser mirrors discovered:', API_BASES.length, API_BASES);
+          return API_BASES;
+        }
+      } catch (e) {
+        console.warn('Server discovery probe failed:', base, e.message || e);
+      }
+    }
+
+    // Fallback: keep seeds, mark first reachable via stats
+    for (const base of API_BASES_SEED) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(base + '/json/stats', {
+          method: 'GET',
+          mode: 'cors',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+        if (res.ok) {
+          currentApi = base;
+          serversDiscovered = true;
+          console.info('Using reachable seed mirror:', base);
+          return API_BASES;
+        }
+      } catch (_) { /* try next */ }
+    }
+
+    console.warn('Could not discover live Radio Browser mirrors — using seed list');
+    return API_BASES;
+  }
+
   // --- API fetch with mirror failover ---
   async function apiFetch(path, params = {}, options = {}) {
-    const { timeoutMs = 12000, retries = 1 } = options;
+    const { timeoutMs = 15000, retries = 2 } = options;
     const query = new URLSearchParams(params).toString();
     const relative = `${path}${query ? '?' + query : ''}`;
 
     if (!isOnline) throw AppError('OFFLINE', 'You appear to be offline');
+
+    // Ensure we have tried discovery once
+    if (!serversDiscovered) {
+      try { await discoverServers(); } catch (_) { /* continue with seeds */ }
+    }
 
     const mirrors = [...API_BASES];
     const startIdx = mirrors.indexOf(currentApi);
@@ -198,27 +339,43 @@ const ErrorHandler = (() => {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeoutMs);
           const res = await fetch(base + relative, {
-            headers: { 'User-Agent': 'AI-Digital-Radio/1.0' },
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
             signal: controller.signal
+            // Note: do NOT set User-Agent — browsers forbid it and it can break CORS
           });
           clearTimeout(timer);
 
           if (res.ok) {
             currentApi = base;
-            return await res.json();
+            try {
+              return await res.json();
+            } catch (parseErr) {
+              lastError = AppError('PARSE', 'Invalid JSON from ' + base, parseErr);
+              continue;
+            }
           }
 
           lastError = AppError('HTTP_' + res.status, `HTTP ${res.status} from ${base}`);
-          if (res.status === 429) await delay(600);
+          if (res.status === 429) await delay(800);
+          if (res.status >= 500) await delay(200);
         } catch (e) {
           lastError = fromNetwork(e);
           console.warn('API mirror failed:', base, messageOf(lastError));
         }
       }
-      if (attempt < retries) await delay(400 * (attempt + 1));
+      if (attempt < retries) {
+        // On full cycle failure, re-discover mirrors once
+        if (attempt === 0) {
+          serversDiscovered = false;
+          try { await discoverServers(); } catch (_) { /* ignore */ }
+        }
+        await delay(500 * (attempt + 1));
+      }
     }
 
-    throw lastError || AppError('API_DOWN', 'All Radio Browser API mirrors failed');
+    throw lastError || AppError('API_DOWN', 'Could not connect to any Radio Browser server. Check your network or try again later.');
   }
 
   // --- Connectivity ---
@@ -239,12 +396,17 @@ const ErrorHandler = (() => {
     AppError,
     fromMedia,
     fromNetwork,
+    fromUnknown,
     messageOf,
+    validateStreamUrl,
+    guard,
+    guardAsync,
     storageGet,
     storageSet,
     delay,
     withTimeout,
     apiFetch,
+    discoverServers,
     setOnline,
     requireOnline
   };
@@ -407,8 +569,16 @@ async function loadStations(isUpdate = false) {
   };
 
   try {
+    // Phase 0 – Connect to Radio Browser network
+    if (isUpdate) showAiStatus('Phase 0/5 · Connecting to Radio Browser network…');
+    serversDiscovered = false;
+    await ErrorHandler.discoverServers();
+    if (isUpdate) {
+      showAiStatus(`Connected via ${currentApi.replace('https://', '')} · scanning…`);
+    }
+
     // Phase 1 – Global popularity ranking
-    if (isUpdate) showAiStatus('Phase 1/4 · Ranking most-clicked & most-voted stations worldwide...');
+    if (isUpdate) showAiStatus('Phase 1/5 · Ranking most-clicked & most-voted stations worldwide...');
     const [byClicks, byVotes, byLastClick] = await Promise.all([
       fetchJson('/json/stations/topclick/250'),
       fetchJson('/json/stations/topvote/200'),
@@ -419,7 +589,7 @@ async function loadStations(isUpdate = false) {
     addStations(byLastClick);
 
     // Phase 2 – Genre deep-dive (batched to be friendly to the public API)
-    if (isUpdate) showAiStatus('Phase 2/4 · Exploring 30+ popular genres & formats...');
+    if (isUpdate) showAiStatus('Phase 2/5 · Exploring 30+ popular genres & formats...');
     const tagResults = await runInBatches(POPULAR_TAGS, 8, tag =>
       fetchJson('/json/stations/search', {
         tag: tag,
@@ -432,7 +602,7 @@ async function loadStations(isUpdate = false) {
     tagResults.forEach(addStations);
 
     // Phase 3 – Geographic coverage across major countries
-    if (isUpdate) showAiStatus('Phase 3/4 · Scanning major countries on every continent...');
+    if (isUpdate) showAiStatus('Phase 3/5 · Scanning major countries on every continent...');
     const countryResults = await runInBatches(MAJOR_COUNTRIES, 7, country =>
       fetchJson('/json/stations/search', {
         country: country,
@@ -505,14 +675,15 @@ async function loadStations(isUpdate = false) {
 
     stationGrid.innerHTML = '';
     emptyState.hidden = false;
-    emptyState.querySelector('h3').textContent = 'Connection error';
-    emptyState.querySelector('p').textContent = msg + ' Check your internet and try Update again.';
-    lastUpdated.textContent = 'Failed to load';
-    ErrorHandler.toast(msg, 'error', 5000);
+    emptyState.querySelector('h3').textContent = 'Network failed to connect';
+    emptyState.querySelector('p').textContent =
+      msg + ' Tip: disable VPN/ad-block for this site, check internet, then press Update Stations.';
+    lastUpdated.textContent = 'Connection failed';
+    ErrorHandler.toast(msg, 'error', 6000);
 
     if (isUpdate) {
-      showAiStatus('❌ AI Agent could not reach the network. Try again.');
-      setTimeout(hideAiStatus, 3500);
+      showAiStatus('❌ Network failed to connect. Try Update again.');
+      setTimeout(hideAiStatus, 4000);
     }
   } finally {
     updateBtn.classList.remove('loading');
@@ -681,7 +852,7 @@ function getBufferedAhead() {
 
 function updateBufferStats() {
   if (!bufBarFill || !currentStation) return;
-
+  try {
   const ahead = getBufferedAhead();
   const ready = audioPlayer.readyState;
   const net = audioPlayer.networkState;
@@ -729,8 +900,22 @@ function updateBufferStats() {
   const readyShort = ['none', 'meta', 'current', 'future', 'enough'][ready] || String(ready);
   bufReadyEl.textContent = `ready ${readyShort}`;
 
-  // Network state
-  const netShort = ['empty', 'idle', 'loading', 'nosrc'][net] || String(net);
+  // Network state + transport
+  const se = StreamEngine.getStats();
+  if (bufTransportEl) {
+    if (se.transport === 'websocket') {
+      const wsLabel = ['ws:connecting', 'ws:open', 'ws:closing', 'ws:closed'][se.wsState] || 'ws';
+      bufTransportEl.textContent = wsLabel;
+      bufTransportEl.title = `WebSocket · ${se.bytesReceived} bytes · queue ${se.queueLength}`;
+    } else {
+      bufTransportEl.textContent = 'http';
+      bufTransportEl.title = 'HTTP progressive stream';
+    }
+  }
+
+  const netShort = se.transport === 'websocket'
+    ? (se.wsState === 1 ? 'ws-live' : 'ws-wait')
+    : (['empty', 'idle', 'loading', 'nosrc'][net] || String(net));
   bufNetEl.textContent = `net ${netShort}`;
 
   // Track progress of buffer growth (for diagnostics)
@@ -738,6 +923,10 @@ function updateBufferStats() {
     ? audioPlayer.buffered.end(audioPlayer.buffered.length - 1)
     : 0;
   lastBufferedEnd = currentEnd;
+  } catch (e) {
+    // Never let the monitor crash the player
+    console.warn('updateBufferStats error:', e);
+  }
 }
 
 function startBufferMonitor() {
@@ -764,7 +953,304 @@ function stopBufferMonitor() {
   if (bufBufferedEl) bufBufferedEl.textContent = 'buf 0s';
   if (bufReadyEl) bufReadyEl.textContent = 'ready —';
   if (bufNetEl) bufNetEl.textContent = 'net —';
+  if (bufTransportEl) {
+    bufTransportEl.textContent = 'http';
+    bufTransportEl.title = '';
+  }
 }
+
+// ============================================================
+// StreamEngine — HTTP audio + WebSocket binary streaming
+// ============================================================
+const StreamEngine = (() => {
+  let ws = null;
+  let mediaSource = null;
+  let sourceBuffer = null;
+  let objectUrl = null;
+  let queue = [];
+  let appending = false;
+  let closed = true;
+  let bytesReceived = 0;
+  let lastChunkAt = 0;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let currentWsUrl = null;
+  let onState = null;
+
+  function emit(state, detail) {
+    if (typeof onState !== 'function') return;
+    try {
+      onState(state, detail);
+    } catch (e) {
+      console.warn('StreamEngine onState handler error:', e);
+    }
+  }
+
+  function isWebSocketUrl(url) {
+    return typeof url === 'string' && /^wss?:\/\//i.test(url);
+  }
+
+  function guessMime(station) {
+    const codec = ((station && station.codec) || '').toLowerCase();
+    if (codec.includes('aac')) return 'audio/aac';
+    if (codec.includes('ogg') || codec.includes('vorbis') || codec.includes('opus')) return 'audio/webm; codecs="opus"';
+    // Most Icecast/Shoutcast WS bridges send MPEG frames
+    return 'audio/mpeg';
+  }
+
+  function detachMediaSource() {
+    try {
+      if (sourceBuffer) {
+        sourceBuffer.onupdateend = null;
+        sourceBuffer.onerror = null;
+      }
+      if (mediaSource && mediaSource.readyState === 'open') {
+        try { mediaSource.endOfStream(); } catch (_) { /* ignore */ }
+      }
+    } catch (_) { /* ignore */ }
+    sourceBuffer = null;
+    mediaSource = null;
+    if (objectUrl) {
+      try { URL.revokeObjectURL(objectUrl); } catch (_) { /* ignore */ }
+      objectUrl = null;
+    }
+  }
+
+  function flushQueue() {
+    if (!sourceBuffer || appending || !queue.length) return;
+    if (sourceBuffer.updating) return;
+    appending = true;
+    const chunk = queue.shift();
+    try {
+      sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+      appending = false;
+      console.warn('SourceBuffer append failed:', e);
+      // Drop buffer and continue
+      if (queue.length > 40) queue = queue.slice(-10);
+      emit('error', e);
+    }
+  }
+
+  function attachMediaSource(station) {
+    return new Promise((resolve, reject) => {
+      if (!window.MediaSource) {
+        reject(ErrorHandler.AppError('MSE_UNSUPPORTED', 'MediaSource Extensions not supported'));
+        return;
+      }
+      detachMediaSource();
+      mediaSource = new MediaSource();
+      objectUrl = URL.createObjectURL(mediaSource);
+      audioPlayer.src = objectUrl;
+
+      mediaSource.addEventListener('sourceopen', () => {
+        try {
+          const mime = guessMime(station);
+          if (!MediaSource.isTypeSupported(mime)) {
+            // Fallback mime
+            const fallback = 'audio/mpeg';
+            if (!MediaSource.isTypeSupported(fallback)) {
+              reject(ErrorHandler.AppError('MSE_CODEC', 'No supported MSE audio codec'));
+              return;
+            }
+            sourceBuffer = mediaSource.addSourceBuffer(fallback);
+          } else {
+            sourceBuffer = mediaSource.addSourceBuffer(mime);
+          }
+          sourceBuffer.mode = 'sequence';
+          sourceBuffer.addEventListener('updateend', () => {
+            appending = false;
+            flushQueue();
+          });
+          sourceBuffer.addEventListener('error', (e) => emit('error', e));
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      }, { once: true });
+
+      mediaSource.addEventListener('error', (e) => reject(e), { once: true });
+    });
+  }
+
+  function handleWsMessage(event) {
+    try {
+      lastChunkAt = Date.now();
+      const data = event.data;
+      if (typeof data === 'string') {
+        try {
+          const msg = JSON.parse(data);
+          if (msg && msg.type === 'metadata') emit('metadata', msg);
+        } catch (_) { /* plain text — ignore */ }
+        return;
+      }
+      if (data instanceof Blob) {
+        data.arrayBuffer().then(buf => {
+          if (closed) return;
+          bytesReceived += buf.byteLength;
+          queue.push(buf);
+          if (queue.length > 60) queue = queue.slice(-30);
+          flushQueue();
+          emit('chunk', { bytes: buf.byteLength, total: bytesReceived });
+        }).catch(e => {
+          console.warn('WS Blob read failed:', e);
+        });
+        return;
+      }
+      if (data instanceof ArrayBuffer) {
+        bytesReceived += data.byteLength;
+        queue.push(data);
+        if (queue.length > 60) queue = queue.slice(-30);
+        flushQueue();
+        emit('chunk', { bytes: data.byteLength, total: bytesReceived });
+      }
+    } catch (e) {
+      console.warn('WS message handler error:', e);
+      emit('error', ErrorHandler.fromUnknown(e));
+    }
+  }
+
+  function scheduleReconnect(station) {
+    if (closed || !currentWsUrl) return;
+    if (reconnectAttempts >= 5) {
+      emit('failed', ErrorHandler.AppError('WS_RECONNECT', 'WebSocket reconnect limit reached'));
+      return;
+    }
+    const wait = Math.min(8000, 500 * Math.pow(2, reconnectAttempts));
+    reconnectAttempts++;
+    emit('reconnecting', { attempt: reconnectAttempts, wait });
+    reconnectTimer = setTimeout(() => {
+      openWebSocket(currentWsUrl, station).catch(err => emit('failed', err));
+    }, wait);
+  }
+
+  function openWebSocket(url, station) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        await attachMediaSource(station);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+
+      try {
+        ws = new WebSocket(url);
+      } catch (e) {
+        reject(ErrorHandler.AppError('WS_OPEN', 'Could not open WebSocket', e));
+        return;
+      }
+      ws.binaryType = 'arraybuffer';
+
+      const openTimer = setTimeout(() => {
+        try { ws.close(); } catch (_) {}
+        reject(ErrorHandler.AppError('WS_TIMEOUT', 'WebSocket connection timed out'));
+      }, 12000);
+
+      ws.onopen = () => {
+        clearTimeout(openTimer);
+        reconnectAttempts = 0;
+        closed = false;
+        activeTransport = 'websocket';
+        emit('open', { url });
+        // Start playback once some data may arrive
+        audioPlayer.play().catch(() => {});
+        resolve();
+      };
+
+      ws.onmessage = handleWsMessage;
+
+      ws.onerror = () => {
+        clearTimeout(openTimer);
+        emit('error', ErrorHandler.AppError('WS_ERROR', 'WebSocket error'));
+      };
+
+      ws.onclose = () => {
+        clearTimeout(openTimer);
+        ws = null;
+        emit('close');
+        if (!closed) scheduleReconnect(station);
+      };
+    });
+  }
+
+  function stop() {
+    closed = true;
+    currentWsUrl = null;
+    reconnectAttempts = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (ws) {
+      try {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close(1000, 'stop');
+      } catch (_) { /* ignore */ }
+      ws = null;
+    }
+    queue = [];
+    appending = false;
+    bytesReceived = 0;
+    detachMediaSource();
+    activeTransport = 'http';
+    emit('stop');
+  }
+
+  /**
+   * Start streaming. Uses WebSocket + MSE when URL is ws(s)://
+   * Returns { transport: 'websocket'|'http', promise }
+   */
+  async function start(station, url, handlers = {}) {
+    stop();
+    onState = handlers.onState || null;
+    closed = false;
+    bytesReceived = 0;
+    lastChunkAt = 0;
+
+    const urlErr = ErrorHandler.validateStreamUrl(url);
+    if (urlErr) throw urlErr;
+
+    if (isWebSocketUrl(url)) {
+      currentWsUrl = url;
+      activeTransport = 'websocket';
+      try {
+        await openWebSocket(url, station);
+        return { transport: 'websocket' };
+      } catch (e) {
+        stop();
+        throw ErrorHandler.fromUnknown(e);
+      }
+    }
+
+    // Standard HTTP(S) progressive stream via <audio>
+    activeTransport = 'http';
+    currentWsUrl = null;
+    try {
+      audioPlayer.src = url;
+      audioPlayer.load();
+      await audioPlayer.play();
+      return { transport: 'http' };
+    } catch (e) {
+      throw ErrorHandler.fromUnknown(e);
+    }
+  }
+
+  function getStats() {
+    return {
+      transport: activeTransport,
+      wsState: ws ? ws.readyState : null, // 0 CONNECTING 1 OPEN 2 CLOSING 3 CLOSED
+      bytesReceived,
+      queueLength: queue.length,
+      lastChunkAgeMs: lastChunkAt ? Date.now() - lastChunkAt : null,
+      reconnectAttempts
+    };
+  }
+
+  return { start, stop, getStats, isWebSocketUrl };
+})();
 
 // ---------- Player ----------
 function handlePlaybackFailure(station, err) {
@@ -788,7 +1274,13 @@ function handlePlaybackFailure(station, err) {
 }
 
 function tryPlayUrl(station, url) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
+    const urlErr = ErrorHandler.validateStreamUrl(url);
+    if (urlErr) {
+      reject(urlErr);
+      return;
+    }
+
     audioPlayer.onerror = null;
     audioPlayer.onplaying = null;
 
@@ -805,8 +1297,10 @@ function tryPlayUrl(station, url) {
     }, 15000);
 
     audioPlayer.onplaying = settle(() => {
-      markHealthy(station.stationuuid);
-      station._healthScore = healthScore(station);
+      try {
+        markHealthy(station.stationuuid);
+        station._healthScore = healthScore(station);
+      } catch (_) { /* ignore */ }
       resolve();
     });
 
@@ -815,91 +1309,198 @@ function tryPlayUrl(station, url) {
     });
 
     try {
-      audioPlayer.src = url;
-      audioPlayer.load();
-      audioPlayer.play().catch(settle((err) => {
-        // Autoplay blocked — not a stream failure
-        if (err && err.name === 'NotAllowedError') {
-          ErrorHandler.toast('Tap play to start (browser blocked autoplay)', 'info', 3500);
-          resolve();
+      const result = await StreamEngine.start(station, url, {
+        onState: (state, detail) => {
+          try {
+            if (state === 'open') {
+              if (bufTransportEl) bufTransportEl.textContent = 'ws';
+              ErrorHandler.toast('WebSocket stream connected', 'success', 2000);
+            } else if (state === 'reconnecting') {
+              if (npMeta) npMeta.textContent = `WebSocket reconnecting (${detail.attempt})…`;
+            } else if (state === 'failed') {
+              settle(reject)(detail || ErrorHandler.AppError('WS_FAILED', 'WebSocket stream failed'));
+            } else if (state === 'error' && detail) {
+              console.warn('StreamEngine error event:', detail);
+            } else if (state === 'metadata' && detail && detail.title) {
+              if (npMeta) npMeta.textContent = detail.title;
+            }
+          } catch (e) {
+            console.warn('onState UI update failed:', e);
+          }
+        }
+      });
+
+      if (result.transport === 'websocket') {
+        if (bufTransportEl) bufTransportEl.textContent = 'ws';
+        activeTransport = 'websocket';
+        setTimeout(() => {
+          if (!settled) settle(resolve)();
+        }, 1500);
+        return;
+      }
+
+      activeTransport = 'http';
+      if (bufTransportEl) bufTransportEl.textContent = 'http';
+      // HTTP: wait for onplaying / timeout / onerror
+    } catch (e) {
+      const appErr = ErrorHandler.fromUnknown(e);
+      if (appErr.code === 'AUTOPLAY') {
+        ErrorHandler.toast(ErrorHandler.messageOf(appErr), 'info', 3500);
+        settle(resolve)();
+        return;
+      }
+      if (StreamEngine.isWebSocketUrl(url)) {
+        settle(reject)(appErr);
+        return;
+      }
+      // Classic HTTP fallback if StreamEngine path threw
+      try {
+        audioPlayer.src = url;
+        audioPlayer.load();
+        await audioPlayer.play();
+        // success path waits for onplaying
+      } catch (err) {
+        const normalized = ErrorHandler.fromUnknown(err);
+        if (normalized.code === 'AUTOPLAY') {
+          ErrorHandler.toast(ErrorHandler.messageOf(normalized), 'info', 3500);
+          settle(resolve)();
           return;
         }
-        reject(ErrorHandler.fromNetwork(err));
-      }));
-    } catch (e) {
-      settle(reject)(e);
+        settle(reject)(normalized);
+      }
     }
   });
 }
 
 async function playStation(station) {
-  if (!station) return;
+  if (!station) {
+    ErrorHandler.toast('No station selected', 'error');
+    return;
+  }
   if (!ErrorHandler.requireOnline('Playback')) return;
+  if (!station.stationuuid) {
+    ErrorHandler.toast('Invalid station data', 'error');
+    return;
+  }
+
+  try {
+    StreamEngine.stop();
+  } catch (e) {
+    console.warn('StreamEngine.stop during playStation:', e);
+  }
 
   currentStation = station;
   const primary = station.url_resolved || station.url;
   const fallback = (station.url && station.url !== primary) ? station.url : null;
+  const wsUrl = station.ws_url || station.websocket || null;
 
-  // Click count (best effort)
   fetchJson(`/json/url/${station.stationuuid}`).catch(() => {});
 
-  npName.textContent = station.name || 'Unknown';
-  npMeta.textContent = [station.country, station.bitrate ? `${station.bitrate} kbps` : '', station.codec]
-    .filter(Boolean).join(' · ');
-  npImg.src = station.favicon || '';
-  npImg.onerror = () => { npImg.src = ''; };
-
-  nowPlaying.hidden = false;
-  updateFavUI();
-  startBufferMonitor();
-
   try {
-    await tryPlayUrl(station, primary);
-    isPlaying = true;
-    updatePlayUI();
-    renderStations();
-    setTimeout(() => {
-      if (isPlaying && currentStation && currentStation.stationuuid === station.stationuuid) {
-        markHealthy(station.stationuuid);
-      }
-    }, 2500);
-  } catch (err1) {
-    if (fallback) {
-      npMeta.textContent = 'Primary stream failed — trying alternate URL…';
-      try {
-        await tryPlayUrl(station, fallback);
-        isPlaying = true;
-        updatePlayUI();
-        renderStations();
-        return;
-      } catch (err2) {
-        handlePlaybackFailure(station, err2);
-        return;
-      }
-    }
-    handlePlaybackFailure(station, err1);
+    npName.textContent = station.name || 'Unknown';
+    npMeta.textContent = [station.country, station.bitrate ? `${station.bitrate} kbps` : '', station.codec]
+      .filter(Boolean).join(' · ');
+    npImg.src = station.favicon || '';
+    npImg.onerror = () => { npImg.src = ''; };
+    nowPlaying.hidden = false;
+    updateFavUI();
+    startBufferMonitor();
+  } catch (e) {
+    console.warn('UI setup for playback failed:', e);
   }
+
+  const urlsToTry = [];
+  if (wsUrl && StreamEngine.isWebSocketUrl(wsUrl)) urlsToTry.push(wsUrl);
+  if (primary) urlsToTry.push(primary);
+  if (fallback) urlsToTry.push(fallback);
+
+  if (!urlsToTry.length) {
+    handlePlaybackFailure(station, ErrorHandler.AppError('BAD_URL', 'Station has no playable stream URL'));
+    return;
+  }
+
+  let lastErr = null;
+  for (let i = 0; i < urlsToTry.length; i++) {
+    const url = urlsToTry[i];
+    const bad = ErrorHandler.validateStreamUrl(url);
+    if (bad && bad.code === 'BAD_URL') {
+      lastErr = bad;
+      continue;
+    }
+    try {
+      if (i > 0) {
+        if (npMeta) {
+          npMeta.textContent = StreamEngine.isWebSocketUrl(url)
+            ? 'Trying WebSocket stream…'
+            : 'Trying alternate stream URL…';
+        }
+        try { StreamEngine.stop(); } catch (_) { /* ignore */ }
+      }
+      await tryPlayUrl(station, url);
+      isPlaying = true;
+      updatePlayUI();
+      renderStations();
+      setTimeout(() => {
+        try {
+          if (isPlaying && currentStation && currentStation.stationuuid === station.stationuuid) {
+            markHealthy(station.stationuuid);
+          }
+        } catch (_) { /* ignore */ }
+      }, 2500);
+      return;
+    } catch (err) {
+      lastErr = ErrorHandler.fromUnknown(err);
+      console.warn('Stream attempt failed:', url, lastErr);
+    }
+  }
+  handlePlaybackFailure(station, lastErr);
 }
 
 function togglePlay() {
   if (!currentStation) return;
-  if (isPlaying) {
-    audioPlayer.pause();
-    isPlaying = false;
-  } else {
-    audioPlayer.play().then(() => { isPlaying = true; }).catch(() => {});
+  try {
+    if (isPlaying) {
+      audioPlayer.pause();
+      isPlaying = false;
+    } else {
+      audioPlayer.play()
+        .then(() => { isPlaying = true; updatePlayUI(); })
+        .catch(err => {
+          const appErr = ErrorHandler.fromUnknown(err);
+          if (appErr.code === 'AUTOPLAY') {
+            ErrorHandler.toast(ErrorHandler.messageOf(appErr), 'info', 3000);
+          } else {
+            ErrorHandler.toast(ErrorHandler.messageOf(appErr), 'error', 3500);
+          }
+          isPlaying = false;
+          updatePlayUI();
+        });
+    }
+    updatePlayUI();
+    renderStations();
+  } catch (e) {
+    console.error('togglePlay failed:', e);
+    ErrorHandler.toast('Playback control failed', 'error');
   }
-  updatePlayUI();
-  renderStations();
 }
 
 function stopPlayback() {
-  audioPlayer.pause();
-  audioPlayer.removeAttribute('src');
-  audioPlayer.load();
+  try {
+    StreamEngine.stop();
+  } catch (e) {
+    console.warn('StreamEngine.stop failed:', e);
+  }
+  try {
+    audioPlayer.pause();
+    audioPlayer.removeAttribute('src');
+    audioPlayer.load();
+  } catch (e) {
+    console.warn('audio reset failed:', e);
+  }
   isPlaying = false;
   currentStation = null;
   nowPlaying.hidden = true;
+  activeTransport = 'http';
   stopBufferMonitor();
   updatePlayUI();
   renderStations();

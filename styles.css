@@ -694,6 +694,17 @@ body {
 #bufState.paused { color: var(--text-dim); }
 #bufState.ended { color: var(--text-dim); }
 
+#bufTransport {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+}
+
+#bufTransport[title^="WebSocket"] {
+  color: var(--success);
+}
+
 .np-controls {
   display: flex;
   gap: 0.4rem;
